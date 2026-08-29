@@ -24,10 +24,22 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 /// Represent a memory location as a path
-#[derive(Clone, Eq, Ord, PartialOrd)]
+#[derive(Clone, Eq)]
 pub struct Path {
     pub value: PathEnum,
     hash: u64,
+}
+
+impl PartialOrd for Path {
+    fn partial_cmp(&self, other: &Path) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Path {
+    fn cmp(&self, other: &Path) -> std::cmp::Ordering {
+        self.hash.cmp(&other.hash)
+    }
 }
 
 impl Debug for Path {
@@ -86,7 +98,7 @@ impl Path {
 }
 
 /// A path represents a left hand side expression.
-#[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub enum PathEnum {
     /// A path to a value that is not stored at a single memory location.
     /// For example, a compile time constant will not have a location.
@@ -237,7 +249,7 @@ impl Path {
     }
 
     pub fn new_static(tcx: TyCtxt<'_>, def_id: DefId) -> Rc<Path> {
-        let ty = tcx.type_of(def_id);
+        let ty = tcx.type_of(def_id).skip_binder();
         let name = utils::summary_key_str(tcx, def_id);
         Rc::new(
             PathEnum::StaticVariable {
@@ -338,15 +350,16 @@ impl Path {
         }
     }
 
-    // TODO: this is only used once in promoted constant, consider removing it
+    /// Given a path that refers to an enum, struct or tuple, create and return a path that
+    /// resolves to the first field of the aggregate, traversing other aggregates if necessary.
     pub fn get_path_to_field_at_offset_0<'tcx>(
         tcx: TyCtxt<'tcx>,
-        // environment: &AbstractDomain,
+        // environment: &Environment,
         path: &Rc<Path>,
         result_rustc_type: Ty<'tcx>,
     ) -> Option<Rc<Path>> {
         trace!(
-            "get_path_to_field_at_offset_0 {:?} {:?}",
+            "get_path_to_field_at_offset_0 path: {:?}, ty: {:?}",
             path,
             result_rustc_type
         );
@@ -357,8 +370,8 @@ impl Path {
                     return Some(path0);
                 }
                 let path0 = Path::new_field(path.clone(), 0);
-                for v in def.variants.iter() {
-                    if let Some(field0) = v.fields.get(0) {
+                for v in def.variants().iter() {
+                    if let Some(field0) = v.fields.get(rustc_abi::FieldIdx::from_usize(0)) {
                         let field0_ty = field0.ty(tcx, substs);
                         let result = Self::get_path_to_field_at_offset_0(
                             tcx, // environment,
@@ -371,8 +384,8 @@ impl Path {
                 }
                 None
             }
-            TyKind::Tuple(substs) => {
-                if let Some(field0_ty) = substs.iter().map(|s| s.expect_ty()).next() {
+            TyKind::Tuple(types) => {
+                if let Some(field0_ty) = types.iter().next() {
                     let path0 = Path::new_field(path.clone(), 0);
                     return Self::get_path_to_field_at_offset_0(
                         tcx, // environment,

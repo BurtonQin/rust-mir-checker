@@ -14,8 +14,7 @@ use super::utils;
 use az::OverflowingCast;
 use rug::Integer;
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::subst::SubstsRef;
-use rustc_middle::ty::{Ty, TyCtxt};
+use rustc_middle::ty::{GenericArgsRef, Ty, TyCtxt};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter, Result};
 use std::rc::Rc;
@@ -48,7 +47,7 @@ impl Debug for ConstantValue {
 }
 
 /// Information that identifies a function or generic function instance.
-#[derive(Clone, Debug, Eq, PartialOrd, PartialEq, Hash, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FunctionReference {
     /// The crate specific key that is used to identify the function in the current crate.
     /// This is not available for functions returned by calls to functions from other crates,
@@ -66,18 +65,37 @@ pub struct FunctionReference {
     pub function_name: Rc<String>,
 }
 
+impl PartialOrd for FunctionReference {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FunctionReference {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let self_def = self.def_id.map(|d| (d.krate.as_u32(), d.index.as_u32()));
+        let other_def = other.def_id.map(|d| (d.krate.as_u32(), d.index.as_u32()));
+        self_def
+            .cmp(&other_def)
+            .then_with(|| self.function_id.cmp(&other.function_id))
+            .then_with(|| self.generic_arguments.cmp(&other.generic_arguments))
+            .then_with(|| self.known_name.cmp(&other.known_name))
+            .then_with(|| self.function_name.cmp(&other.function_name))
+    }
+}
+
 /// Constructors
 impl ConstantValue {
     /// Returns a constant value that is a reference to a function
     pub fn for_function<'a, 'tcx, 'compiler>(
         function_id: usize,
         def_id: DefId,
-        generic_args: Option<SubstsRef<'tcx>>,
+        generic_args: Option<GenericArgsRef<'tcx>>,
         tcx: TyCtxt<'tcx>,
         known_names_cache: &mut KnownNamesCache,
     ) -> ConstantValue {
         let function_name = utils::summary_key_str(tcx, def_id).to_string();
-        let generic_arguments = if let Some(generic_args) = generic_args {
+        let generic_arguments: Vec<ExpressionType> = if let Some(generic_args) = generic_args {
             generic_args.types().map(|t| t.kind().into()).collect()
         } else {
             vec![]
@@ -404,7 +422,7 @@ impl<'tcx> ConstantValueCache<'tcx> {
         &mut self,
         def_id: DefId,
         ty: Ty<'tcx>,
-        generic_args: Option<SubstsRef<'tcx>>,
+        generic_args: Option<GenericArgsRef<'tcx>>,
         tcx: TyCtxt<'tcx>,
         known_names_cache: &mut KnownNamesCache,
     ) -> &ConstantValue {

@@ -18,10 +18,8 @@ use crate::analysis::wto::{Wto, WtoCircle, WtoVertex, WtoVisitor};
 use crate::analysis::z3_solver::Z3Solver;
 use crate::checker::assertion_checker::AssertionChecker;
 use crate::checker::checker_trait::CheckerTrait;
-use itertools::Itertools;
 use log::{debug, error, warn};
 use rug::Integer;
-use rustc_errors::DiagnosticBuilder;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir;
 use rustc_middle::ty::{Ty, TyKind};
@@ -39,10 +37,16 @@ where
     // Global context
     pub context: &'a mut GlobalContext<'tcx, 'compiler>,
 
-    // The current function's DefId
+    // Type visitor
+    pub type_visitor: TypeVisitor<'tcx>,
+
+    // Current MIR CFG
+    pub mir: &'tcx mir::Body<'tcx>,
+
+    // Def ID of current analyzed function
     pub def_id: DefId,
 
-    // The current function's w.t.o
+    // WTO (Weak Topological Ordering)
     pub wto: Wto<'tcx>,
 
     // Current span
@@ -62,9 +66,6 @@ where
 
     // There may be multiple return statements, record them so we can compute the union of the return values
     pub result_blocks: HashSet<mir::BasicBlock>,
-
-    // Helper struct to get information in Rust's type system
-    pub type_visitor: TypeVisitor<'tcx>,
 
     // Helper struct to store information about the current crate
     pub crate_context: CrateContext<'compiler, 'tcx>,
@@ -97,7 +98,7 @@ where
     pub z3_solver: Z3Solver,
 
     // Buffered diagnostics
-    pub buffered_diagnostics: Vec<Diagnostic<'compiler>>,
+    pub buffered_diagnostics: Vec<Diagnostic>,
 }
 
 impl<'tcx, 'a, 'compiler, DomainType> WtoFixPointIterator<'tcx, 'a, 'compiler, DomainType>
@@ -117,12 +118,14 @@ where
         call_stack: Vec<DefId>,
     ) -> Self {
         let wto = context.get_wto(def_id);
-        let type_visitor = TypeVisitor::new(def_id, wto.get_mir().clone(), context.tcx);
+        let mir = wto.get_mir();
+        let type_visitor = TypeVisitor::new(def_id, mir, context.tcx);
 
         Self {
             current_span: rustc_span::DUMMY_SP,
             current_location: mir::Location::START,
             context,
+            mir,
             def_id,
             init_state,
             wto,
@@ -176,12 +179,7 @@ where
         self.context
             .diagnostics_for
             .insert(self.def_id, self.buffered_diagnostics.clone());
-
-        // Cancel the buffered diagnostics because they have been copied into global context
-        // If not, the compiler will emit a bug when dropping them
-        for diagnostic in &mut self.buffered_diagnostics {
-            diagnostic.cancel();
-        }
+        self.buffered_diagnostics.clear();
     }
 
     pub fn get_exit_state(&self) -> Option<AbstractDomain<DomainType>> {
@@ -190,7 +188,7 @@ where
             .into_iter()
             .filter(|(bb, _domain)| self.result_blocks.contains(bb))
             .map(|(_bb, domain)| domain)
-            .fold1(|state1, state2| state1.join(&state2))
+            .reduce(|state1, state2| state1.join(&state2))
     }
 
     pub fn init_promote_constants(&mut self)
@@ -225,7 +223,8 @@ where
             debug!("promoted constant wto: {:?}", promoted_constant_wto);
             // Substitute def_id's wto with promoted constant's wto
             wto_visitor.wto = promoted_constant_wto;
-            wto_visitor.type_visitor.mir = constant_mir.clone();
+            wto_visitor.type_visitor.mir = constant_mir;
+            wto_visitor.mir = constant_mir;
             wto_visitor.run();
 
             // self.visit_promoted_constants_block();
@@ -354,7 +353,7 @@ where
             // Promoting a reference to a reference.
             ordinal += 99;
             let value_path: Rc<Path> = Rc::new(PathEnum::PromotedConstant { ordinal }.into());
-            self.promote_reference(environment, ty, &value_path, local_path, ordinal);
+            self.promote_reference(environment, *ty, &value_path, local_path, ordinal);
             let promoted_value = SymbolicValue::make_from(Expression::Reference(value_path), 1);
             environment.update_value_at(promoted_root.clone(), promoted_value);
         } else {
@@ -526,7 +525,7 @@ where
                             );
                             match ty.kind() {
                                 TyKind::Adt(..) if ty.is_enum() => {}
-                                TyKind::Generator(..) => {}
+                                TyKind::Coroutine(..) => {}
                                 _ => {
                                     result = Some(self.get_u128_const_val(0));
                                 }
@@ -626,7 +625,7 @@ where
             } else {
                 None
             };
-            let ty = self.context.tcx.type_of(def_id);
+            let ty = self.context.tcx.type_of(def_id).skip_binder();
             let func_const = self
                 .crate_context
                 .constant_value_cache
@@ -743,60 +742,49 @@ where
         format!("{:?}", operand)
     }
 
-    /// Recover the variable name for each assert message
-    /// This is used to pretty print the diagnostic messages
+    /// Extract variables' name from the expression in the assertion statement
     pub fn recover_var_name(&self, assert_kind: &mir::AssertKind<mir::Operand<'tcx>>) -> String {
         use mir::AssertKind::*;
         use mir::BinOp;
-
-        // The following code is adapted from the original implementation of the `Debug` trait for `AssertKind`
         match assert_kind {
-            BoundsCheck { ref len, ref index } => format!(
-                "index out of bounds: the length is {:?} but the index is {:?}",
-                self.get_var_name(len),
-                self.get_var_name(index)
-            ),
-            OverflowNeg(op) => format!(
-                "attempt to negate `{:#?}`, which would overflow",
-                self.get_var_name(op)
-            ),
+            BoundsCheck { len, index } => {
+                format!(
+                    "index out of bounds: the len is {:?} but the index is {:?}",
+                    self.get_var_name(len),
+                    self.get_var_name(index)
+                )
+            }
             DivisionByZero(op) => {
                 format!("attempt to divide `{:#?}` by zero", self.get_var_name(op))
             }
-            RemainderByZero(op) => format!(
-                "attempt to calculate the remainder of `{:#?}` with a divisor of zero",
-                self.get_var_name(op)
+            RemainderByZero(op) => {
+                format!(
+                    "attempt to calculate the remainder of `{:#?}` with a divisor of zero",
+                    self.get_var_name(op)
+                )
+            }
+            Overflow(BinOp::Add, l, r) => format!(
+                "attempt to compute `{:?} + {:?}`, which would overflow",
+                self.get_var_name(l),
+                self.get_var_name(r)
             ),
-            Overflow(BinOp::Add, l, r) => {
-                format!(
-                    "attempt to compute `{:#?} + {:#?}`, which would overflow",
-                    self.get_var_name(l),
-                    self.get_var_name(r)
-                )
-            }
-            Overflow(BinOp::Sub, l, r) => {
-                format!(
-                    "attempt to compute `{:#?} - {:#?}`, which would overflow",
-                    self.get_var_name(l),
-                    self.get_var_name(r)
-                )
-            }
-            Overflow(BinOp::Mul, l, r) => {
-                format!(
-                    "attempt to compute `{:#?} * {:#?}`, which would overflow",
-                    self.get_var_name(l),
-                    self.get_var_name(r)
-                )
-            }
-            Overflow(BinOp::Div, l, r) => {
-                format!(
-                    "attempt to compute `{:#?} / {:#?}`, which would overflow",
-                    self.get_var_name(l),
-                    self.get_var_name(r)
-                )
-            }
+            Overflow(BinOp::Sub, l, r) => format!(
+                "attempt to compute `{:?} - {:?}`, which would overflow",
+                self.get_var_name(l),
+                self.get_var_name(r)
+            ),
+            Overflow(BinOp::Mul, l, r) => format!(
+                "attempt to compute `{:?} * {:?}`, which would overflow",
+                self.get_var_name(l),
+                self.get_var_name(r)
+            ),
+            Overflow(BinOp::Div, l, r) => format!(
+                "attempt to compute `{:?} / {:?}`, which would overflow",
+                self.get_var_name(l),
+                self.get_var_name(r)
+            ),
             Overflow(BinOp::Rem, l, r) => format!(
-                "attempt to compute the remainder of `{:#?} % {:#?}`, which would overflow",
+                "attempt to compute `{:?} % {:?}`, which would overflow",
                 self.get_var_name(l),
                 self.get_var_name(r)
             ),
@@ -812,29 +800,28 @@ where
                     self.get_var_name(r)
                 )
             }
-            _ => format!("{}", assert_kind.description()),
+            _ => format!("{assert_kind:?}"),
         }
     }
 
     pub fn emit_diagnostic(
         &mut self,
-        mut diagnostic_builder: DiagnosticBuilder<'compiler>,
+        span: rustc_span::Span,
+        message: String,
+        is_error: bool,
         is_memory_safety: bool,
         cause: DiagnosticCause,
     ) {
         use rustc_span::hygiene::{ExpnData, ExpnKind, MacroKind};
-        if let [span] = &diagnostic_builder.span.primary_spans() {
-            if let Some(ExpnData {
-                kind: ExpnKind::Macro(MacroKind::Derive, ..),
-                ..
-            }) = span.source_callee()
-            {
-                info!("derive macro has warning: {:?}", diagnostic_builder);
-                diagnostic_builder.cancel();
-                return;
-            }
+        if let Some(ExpnData {
+            kind: ExpnKind::Macro(MacroKind::Derive, ..),
+            ..
+        }) = span.source_callee()
+        {
+            info!("derive macro has warning: {:?}", message);
+            return;
         }
-        let diagnostic = Diagnostic::new(diagnostic_builder, is_memory_safety, cause);
+        let diagnostic = Diagnostic::new(span, message, is_error, is_memory_safety, cause);
         self.buffered_diagnostics.push(diagnostic);
     }
 
@@ -854,11 +841,9 @@ where
             debug!("The precondition is bottom, ignore the analysis for this block");
             post = &pre;
         }
-        debug!("Finish analyzing basic block: {:?}", bb);
         debug!("Post-Condition for {:?}: {:?}", bb, post);
-        debug!("Exit condition {:?}: {:?}", bb, post.exit_conditions);
+        debug!("###########################################################################");
         self.post.insert(bb, post.clone());
-        debug!("###########################################################################\n");
     }
 
     /// Perform widening if the iteration counter exceeds `widening_delay`
@@ -914,7 +899,7 @@ where
         debug!("Start merging state from predecessors");
         let pred_states: Vec<AbstractDomain<DomainType>> =
             // For all predecessors of bb
-            self.wto.get_mir().predecessors()[bb]
+            self.wto.get_mir().basic_blocks.predecessors()[bb]
                 .iter()
                 .filter_map(|pred_bb| {
                     // For a predecessor pred_bb, get the post condition
@@ -940,7 +925,7 @@ where
         // Merge states using the join operator
         let joined_state = pred_states
             .into_iter()
-            .fold1(|state1, state2| state1.join(&state2))
+            .reduce(|state1, state2| state1.join(&state2))
             .expect("Panic while merging states using fold1");
         debug!("Merged state: {:?}", joined_state);
         joined_state

@@ -5,7 +5,6 @@ use crate::analysis::option::AnalysisOption;
 use log::{error, info};
 use rustc_driver::Compilation;
 use rustc_interface::interface;
-use rustc_interface::Queries;
 use rustc_middle::ty::TyCtxt;
 
 pub struct MirCheckerCallbacks {
@@ -25,49 +24,38 @@ impl MirCheckerCallbacks {
 impl rustc_driver::Callbacks for MirCheckerCallbacks {
     /// Called before creating the compiler instance
     fn config(&mut self, config: &mut interface::Config) {
-        self.source_name = config.input.source_name().to_string();
-        config.crate_cfg.insert(("mir_checker".to_string(), None));
+        self.source_name = match &config.input {
+            rustc_session::config::Input::File(p) => p.display().to_string(),
+            rustc_session::config::Input::Str { name, .. } => format!("{name:?}"),
+        };
+        config.crate_cfg.push("mir_checker".to_string());
         info!("Source file: {}", self.source_name);
     }
 
     /// Called after analysis. Return value instructs the compiler whether to
     /// continue the compilation afterwards (defaults to `Compilation::Continue`)
-    fn after_analysis<'compiler, 'tcx>(
+    fn after_analysis<'tcx>(
         &mut self,
-        compiler: &'compiler interface::Compiler,
-        queries: &'tcx Queries<'tcx>,
-    ) -> Compilation {
-        queries
-            .global_ctxt()
-            .unwrap()
-            .peek_mut()
-            .enter(|tcx| self.run_analysis(compiler, tcx));
-        Compilation::Continue
-    }
-}
-
-impl MirCheckerCallbacks {
-    fn run_analysis<'tcx, 'compiler>(
-        &mut self,
-        compiler: &'compiler interface::Compiler,
+        compiler: &interface::Compiler,
         tcx: TyCtxt<'tcx>,
-    ) {
-        if self.source_name.contains("/libcore")
-            || self.source_name.contains("/compiler_builtins")
-            || self.source_name.contains("/liballoc")
-            || self.source_name.contains("/macro")
-            || self.source_name.contains("/libc")
+    ) -> Compilation {
+        // Skip analysis for core/std/alloc crates
+        if self.source_name.ends_with("libcore")
+            || self.source_name.ends_with("libstd")
+            || self.source_name.ends_with("liballoc")
+            || self.source_name.ends_with("libproc_macro")
+            || self.source_name.ends_with("build_script_build")
         {
             info!(
                 "Find filename that should skip the analysis: {}",
                 self.source_name
             );
-            return;
+            return Compilation::Continue;
         }
 
         // Initialize global analysis context
         if let Some(mut global_context) =
-            GlobalContext::new(compiler.session(), tcx, self.analysis_options.clone())
+            GlobalContext::new(&compiler.sess, tcx, self.analysis_options.clone())
         {
             // Initialize numerical analyzer
             let mut numerical_analysis = NumericalAnalysis::new(&mut global_context);
@@ -83,5 +71,6 @@ impl MirCheckerCallbacks {
         } else {
             error!("GlobalContext Initialization Failed");
         }
+        Compilation::Continue
     }
 }

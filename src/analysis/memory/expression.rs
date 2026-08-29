@@ -353,8 +353,8 @@ impl<'a> From<&TyKind<'a>> for ExpressionType {
             | TyKind::Foreign(..)
             | TyKind::FnDef(..)
             | TyKind::FnPtr(..)
-            | TyKind::Generator(..)
-            | TyKind::GeneratorWitness(..)
+            | TyKind::Coroutine(..)
+            | TyKind::CoroutineWitness(..)
             | TyKind::RawPtr(..)
             | TyKind::Ref(..)
             | TyKind::Slice(..)
@@ -381,8 +381,8 @@ impl ExpressionType {
             U64 => tcx.types.u64,
             U128 => tcx.types.u128,
             Usize => tcx.types.usize,
-            Reference => tcx.mk_ty(TyKind::Str),
-            NonPrimitive => tcx.types.trait_object_dummy_self,
+            Reference => tcx.types.str_,
+            NonPrimitive => tcx.types.unit,
         }
     }
 

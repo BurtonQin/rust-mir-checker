@@ -24,7 +24,7 @@ use crate::checker::checker_trait::CheckerTrait;
 use itertools::Itertools;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir;
-use rustc_middle::ty::subst::SubstsRef;
+use rustc_middle::ty::GenericArgsRef;
 use rustc_middle::ty::{Ty, TyKind};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter, Result};
@@ -48,7 +48,7 @@ where
     pub callee_fun_val: Rc<SymbolicValue>,
 
     /// The callee's generic argument list
-    pub callee_generic_arguments: Option<SubstsRef<'tcx>>,
+    pub callee_generic_arguments: Option<GenericArgsRef<'tcx>>,
 
     /// The callee's KnownNames
     pub callee_known_name: KnownNames,
@@ -94,7 +94,7 @@ where
     pub(crate) fn new(
         block_visitor: &'call mut BlockVisitor<'tcx, 'analysis, 'block, 'compilation, DomainType>,
         callee_def_id: DefId,
-        callee_generic_arguments: Option<SubstsRef<'tcx>>,
+        callee_generic_arguments: Option<GenericArgsRef<'tcx>>,
         callee_generic_argument_map: Option<HashMap<rustc_span::Symbol, Ty<'tcx>>>,
         func_const: ConstantValue,
     ) -> CallVisitor<'call, 'block, 'analysis, 'compilation, 'tcx, DomainType> {
@@ -257,7 +257,7 @@ where
                                 );
                             return extract_func_ref(self.block_visitor.visit_function_reference(
                                 *def_id,
-                                ty,
+                                *ty,
                                 specialized_substs,
                             ));
                         }
@@ -421,7 +421,7 @@ where
         let length = self.actual_args[0].1.clone();
         let alignment = self.actual_args[1].1.clone();
         let tcx = self.block_visitor.body_visitor.context.tcx;
-        let byte_slice = tcx.mk_slice(tcx.types.u8);
+        let byte_slice = Ty::new_slice(tcx, tcx.types.u8);
         let heap_path = Path::get_as_path(
             self.block_visitor
                 .body_visitor
@@ -562,20 +562,14 @@ where
             .expect("std::mem::size_of must be called with generic arguments")
             .get(&sym)
             .expect("std::mem::size must have generic argument T");
-        let param_env = self
-            .block_visitor
-            .body_visitor
-            .context
-            .tcx
-            .param_env(self.callee_def_id);
         if let Ok(ty_and_layout) = self
             .block_visitor
             .body_visitor
             .context
             .tcx
-            .layout_of(param_env.and(*t))
+            .layout_of(rustc_middle::ty::TypingEnv::fully_monomorphized().as_query_input(*t))
         {
-            Rc::new((ty_and_layout.layout.size.bytes() as u128).into())
+            Rc::new((ty_and_layout.layout.size().bytes() as u128).into())
         } else {
             // SymbolicValue::make_typed_unknown(ExpressionType::U128)
             Rc::new(symbolic_value::TOP)
@@ -629,11 +623,13 @@ where
         assert!(self.destination.is_none());
         let body_visitor = &mut self.block_visitor.body_visitor;
         if !body_visitor.state.is_bottom() {
-            let warning = body_visitor.context.session.struct_span_warn(
+            body_visitor.emit_diagnostic(
                 body_visitor.current_span,
-                format!("[MirChecker] Possible error: run into panic code").as_str(),
+                "[MirChecker] Possible error: run into panic code".to_string(),
+                false,
+                false,
+                DiagnosticCause::Panic,
             );
-            body_visitor.emit_diagnostic(warning, false, DiagnosticCause::Panic);
         }
     }
 
@@ -692,19 +688,23 @@ where
         match check_result {
             CheckerResult::Safe => (),
             CheckerResult::Unsafe => {
-                let error = body_visitor.context.session.struct_span_warn(
+                body_visitor.emit_diagnostic(
                     body_visitor.current_span,
-                    format!("[MirChecker] Provably error: index out of bound",).as_str(),
+                    "[MirChecker] Provably error: index out of bound".to_string(),
+                    true,
+                    false,
+                    DiagnosticCause::Index,
                 );
-                body_visitor.emit_diagnostic(error, false, DiagnosticCause::Index);
                 return;
             }
             CheckerResult::Warning => {
-                let warning = body_visitor.context.session.struct_span_warn(
+                body_visitor.emit_diagnostic(
                     body_visitor.current_span,
-                    format!("[MirChecker] Possible error: index out of bound").as_str(),
+                    "[MirChecker] Possible error: index out of bound".to_string(),
+                    false,
+                    false,
+                    DiagnosticCause::Index,
                 );
-                body_visitor.emit_diagnostic(warning, false, DiagnosticCause::Index);
             }
         }
 

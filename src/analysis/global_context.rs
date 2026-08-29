@@ -61,7 +61,7 @@ pub struct GlobalContext<'tcx, 'compiler> {
     pub analysis_options: AnalysisOption,
 
     /// Generated diagnostic messages for each DefId
-    pub diagnostics_for: DiagnosticsForDefId<'compiler>,
+    pub diagnostics_for: DiagnosticsForDefId,
 }
 
 impl<'tcx, 'compiler> fmt::Debug for GlobalContext<'tcx, 'compiler> {
@@ -78,7 +78,7 @@ impl<'tcx, 'compiler> GlobalContext<'tcx, 'compiler> {
     ) -> Option<Self> {
         if analysis_options.show_entries {
             let mut names = HashSet::new();
-            for def_id in tcx.body_owners() {
+            for def_id in tcx.hir_body_owners() {
                 if tcx.def_kind(def_id) == DefKind::Fn || tcx.def_kind(def_id) == DefKind::AssocFn {
                     let name = tcx.item_name(def_id.to_def_id());
                     if !names.contains(&name) {
@@ -93,7 +93,7 @@ impl<'tcx, 'compiler> GlobalContext<'tcx, 'compiler> {
 
         if analysis_options.show_entries_index {
             // let mut names = HashSet::new();
-            for def_id in tcx.body_owners() {
+            for def_id in tcx.hir_body_owners() {
                 if tcx.def_kind(def_id) == DefKind::Fn || tcx.def_kind(def_id) == DefKind::AssocFn {
                     // let name = tcx.item_name(def_id.to_def_id());
                     // if !names.contains(&name) {
@@ -110,7 +110,7 @@ impl<'tcx, 'compiler> GlobalContext<'tcx, 'compiler> {
         let mut entry_func = None;
 
         // List functions
-        for def_id in tcx.body_owners() {
+        for def_id in tcx.hir_body_owners() {
             let def_kind = tcx.def_kind(def_id);
             // Find the DefId for the entry point, note that the entry point must be a function
             if def_kind == DefKind::Fn || def_kind == DefKind::AssocFn {
@@ -133,7 +133,7 @@ impl<'tcx, 'compiler> GlobalContext<'tcx, 'compiler> {
                 else {
                     let entry_point = analysis_options.entry_point.clone();
                     let item_name = tcx.item_name(def_id.to_def_id());
-                    if item_name.to_string() == *entry_point {
+                    if item_name.as_str() == entry_point.as_str() {
                         entry_func = Some(def_id);
                         debug!("Entry Point: {:?}, DefId: {:?}", item_name, def_id);
                     } else {

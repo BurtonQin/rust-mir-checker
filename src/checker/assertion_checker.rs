@@ -42,10 +42,9 @@ where
 
     fn run(&mut self) {
         info!("====== Assertion Checker starts ======");
-        let basic_blocks = self.body_visitor.wto.basic_blocks().clone();
-        for (bb, bb_data) in basic_blocks.iter_enumerated() {
+        let post = self.body_visitor.post.clone();
+        for (bb, bb_data) in self.body_visitor.wto.cfg.basic_blocks.iter_enumerated() {
             let term = bb_data.terminator();
-            let post = self.body_visitor.post.clone();
             if let Some(s) = post.get(&bb) {
                 self.run_terminator(term, s);
             }
@@ -67,29 +66,24 @@ where
 {
     fn run_terminator(
         &mut self,
-        term: &Terminator<'tcx>,
+        terminator: &mir::Terminator<'tcx>,
         abstract_value: &AbstractDomain<DomainType>,
     ) {
-        let Terminator { source_info, kind } = term;
-        let span = source_info.span;
-        if let TerminatorKind::Assert {
+        let mir::Terminator { kind, .. } = terminator;
+        if let mir::TerminatorKind::Assert {
             cond,
             expected,
             msg,
-            ..
-        } = &kind
+            target: _,
+            unwind: _,
+        } = kind
         {
-            debug!(
-                "Checking assertion: {:?} with message: {:?}, exptected: {}",
-                term, msg, expected
-            );
-            debug!("Current state: {:?}", abstract_value);
-
-            if let Some(place) = cond.place() {
-                if let Some(cond_val) = self.body_visitor.place_to_abstract_value.get(&place) {
+            let span = &terminator.source_info.span;
+            if let mir::Operand::Move(place) | mir::Operand::Copy(place) = cond {
+                if let Some(cond_val) = self.body_visitor.place_to_abstract_value.get(place) {
                     debug!("place: {:?}, cond_val: {:?}", place, cond_val);
                     let cond_val = cond_val.clone();
-                    let check_result = match msg {
+                    let check_result = match msg.as_ref() {
                         mir::AssertKind::Overflow(..) => {
                             self.check_overflow(cond_val.clone(), *expected, abstract_value)
                         }
@@ -99,31 +93,27 @@ where
                     match check_result {
                         CheckerResult::Safe => (),
                         CheckerResult::Unsafe => {
-                            let error = self.body_visitor.context.session.struct_span_warn(
-                                span,
-                                format!(
-                                    "[MirChecker] Provably error: {:?}",
-                                    self.body_visitor.recover_var_name(msg)
-                                )
-                                .as_str(),
+                            let msg_str = format!(
+                                "[MirChecker] Provably error: {:?}",
+                                self.body_visitor.recover_var_name(msg)
                             );
                             self.body_visitor.emit_diagnostic(
-                                error,
+                                *span,
+                                msg_str,
+                                true,
                                 false,
                                 DiagnosticCause::from(msg),
                             );
                         }
                         CheckerResult::Warning => {
-                            let warning = self.body_visitor.context.session.struct_span_warn(
-                                span,
-                                format!(
-                                    "[MirChecker] Possible error: {:?}",
-                                    self.body_visitor.recover_var_name(msg)
-                                )
-                                .as_str(),
+                            let msg_str = format!(
+                                "[MirChecker] Possible error: {:?}",
+                                self.body_visitor.recover_var_name(msg)
                             );
                             self.body_visitor.emit_diagnostic(
-                                warning,
+                                *span,
+                                msg_str,
+                                false,
                                 false,
                                 DiagnosticCause::from(msg),
                             );
@@ -264,7 +254,7 @@ where
                             if let Some(rustc_type) =
                                 self.body_visitor.type_visitor.path_ty_cache.get(&new_path)
                             {
-                                self.check_within_range(new_path, rustc_type, abstract_value)
+                                self.check_within_range(new_path, *rustc_type, abstract_value)
                             } else {
                                 unreachable!(
                                     "Value that we want to test does not have type infomation"

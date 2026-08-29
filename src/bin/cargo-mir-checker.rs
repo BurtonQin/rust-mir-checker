@@ -1,3 +1,5 @@
+#![feature(rustc_private)]
+
 /// This file is derived from miri:
 /// https://github.com/rust-lang/miri/blob/master/src/bin/cargo-miri.rs
 use rust_mir_checker::utils;
@@ -132,10 +134,16 @@ fn main() {
         // but with the `RUSTC` env var set to the `cargo-mir-checker` binary so that we come back in the other branch,
         // and dispatch the invocations to `rustc` and `mir-checker`, respectively.
         in_cargo_mir_checker();
-    } else if let Some("rustc") = std::env::args().nth(1).as_ref().map(AsRef::as_ref) {
-        // This arm is executed when `cargo-mir-checker` runs `cargo rustc` with the `RUSTC_WRAPPER` env var set to itself:
-        // dependencies get dispatched to `rustc`, the final library/binary to `mir-checker`.
-        inside_cargo_rustc();
+    } else if let Some(arg) = std::env::args().nth(1) {
+        if arg == "rustc" || arg.ends_with("/rustc") || arg.ends_with("\\rustc") || arg.ends_with("/rustc.exe") {
+            // This arm is executed when `cargo-mir-checker` runs `cargo rustc` with the `RUSTC_WRAPPER` env var set to itself:
+            // dependencies get dispatched to `rustc`, the final library/binary to `mir-checker`.
+            inside_cargo_rustc();
+        } else {
+            show_error(
+                format!("`cargo-mir-checker` must be called with either `mir-checker` or `rustc` as first argument, got `{}`.", arg),
+            );
+        }
     } else {
         show_error(
             "`cargo-mir-checker` must be called with either `mir-checker` or `rustc` as first argument.".to_string(),

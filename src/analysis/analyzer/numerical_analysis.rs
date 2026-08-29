@@ -28,62 +28,46 @@ impl<'tcx, 'a, 'compiler> StaticAnalysis<'tcx, 'a, 'compiler>
     }
 
     fn emit_diagnostics(&mut self) {
-        let mut diagnostics: Vec<&mut Diagnostic<'_>> = self
+        let mut diagnostics: Vec<Diagnostic> = self
             .context
             .diagnostics_for
             .map
-            .values_mut()
+            .values()
             .flatten()
+            .cloned()
             .collect();
 
         diagnostics.sort_by(Diagnostic::compare);
 
-        // If `deny_warnings` flag is set, change all diagnoses' level to `error`
-        // This is used for debugging
-        if self.context.analysis_options.deny_warnings {
-            for diag in &mut diagnostics {
-                diag.builder.level = rustc_errors::Level::Error;
-            }
-        }
-
         // According to `suppress_warnings` flag, filter out warnings that users want to ignore
-        let mut diagnostics: Vec<&mut Diagnostic<'_>> =
+        let diagnostics: Vec<Diagnostic> =
             if let Some(suppressed_warnings) = &self.context.analysis_options.suppressed_warnings {
-                let mut res: Vec<&mut Diagnostic<'_>> = Vec::new();
-                for diag in diagnostics.iter_mut() {
-                    if suppressed_warnings.contains(&diag.cause) {
-                        diag.cancel();
-                    } else {
-                        res.push(diag);
-                    }
-                }
-                res
+                diagnostics
+                    .into_iter()
+                    .filter(|diag| !suppressed_warnings.contains(&diag.cause))
+                    .collect()
             } else {
-                diagnostics.into_iter().collect()
+                diagnostics
             };
 
         // According to `memory_safety_only` flag, filter only memory-safety diagnosis
-        // Cancel other diagnoses that will not be emitted
-        let diagnostics_to_emit: Vec<&mut Diagnostic<'_>> =
+        let diagnostics_to_emit: Vec<Diagnostic> =
             if self.context.analysis_options.memory_safety_only {
-                let mut res: Vec<&mut Diagnostic<'_>> = Vec::new();
-                for diag in diagnostics.iter_mut() {
-                    if diag.is_memory_safety {
-                        res.push(diag);
-                    } else {
-                        diag.cancel();
-                    }
-                }
-                res
+                diagnostics
+                    .into_iter()
+                    .filter(|diag| diag.is_memory_safety)
+                    .collect()
             } else {
-                diagnostics.into_iter().collect()
+                diagnostics
             };
 
-        fn emit(db: &mut Diagnostic<'_>) {
-            db.emit();
+        for diag in diagnostics_to_emit {
+            if diag.is_error || self.context.analysis_options.deny_warnings {
+                self.context.session.dcx().span_err(diag.span, diag.message);
+            } else {
+                self.context.session.dcx().span_warn(diag.span, diag.message);
+            }
         }
-
-        diagnostics_to_emit.into_iter().for_each(emit);
     }
 
     fn run(&mut self) -> Result<AnalysisInfo> {

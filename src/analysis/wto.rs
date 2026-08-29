@@ -1,5 +1,4 @@
 use log::debug;
-use rustc_data_structures::graph::WithSuccessors;
 use rustc_middle::mir::BasicBlock;
 use rustc_middle::mir::{self, Body};
 use std::cell::RefCell;
@@ -133,7 +132,7 @@ pub struct Wto<'tcx> {
     dfn: HashMap<BasicBlock, u32>,
     wto_components: Vec<WtoComponent>,
     num: u32,
-    cfg: &'tcx Body<'tcx>,
+    pub cfg: &'tcx Body<'tcx>,
     loop_heads: Vec<BasicBlock>,
     nesting_map: HashMap<WtoVertex, WtoNesting>,
 }
@@ -161,7 +160,7 @@ impl<'tcx> Deref for Wto<'tcx> {
 impl<'tcx> Wto<'tcx> {
     pub fn new(cfg: &'tcx Body<'tcx>) -> Self {
         let mut dfn = HashMap::new();
-        for (bb, _) in cfg.basic_blocks().iter_enumerated() {
+        for (bb, _) in cfg.basic_blocks.iter_enumerated() {
             dfn.insert(bb, 0);
         }
         let mut wto = Self {
@@ -200,7 +199,7 @@ impl<'tcx> Wto<'tcx> {
 
     fn component(&mut self, vertex: BasicBlock) -> WtoCircle {
         let mut partition = Vec::new();
-        for succ in self.cfg.successors(vertex) {
+        for succ in self.cfg.basic_blocks[vertex].terminator().successors() {
             if self.dfn[&succ] == 0 {
                 self.visit(succ, &mut partition);
             }
@@ -217,7 +216,7 @@ impl<'tcx> Wto<'tcx> {
         let mut head = self.num;
         let mut is_loop = false;
 
-        for succ in self.cfg.successors(vertex) {
+        for succ in self.cfg.basic_blocks[vertex].terminator().successors() {
             let min;
             if self.dfn[&succ] == 0 {
                 min = self.visit(succ, partition);
