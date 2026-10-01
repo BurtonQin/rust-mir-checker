@@ -187,7 +187,7 @@ where
                 .filter(|(bb, _domain)| body_visitor.result_blocks.contains(bb))
                 .map(|(_bb, domain)| domain)
                 .fold1(|state1, state2| state1.join(&state2))
-                .expect("panic in fold1");
+                .unwrap_or_else(AbstractDomain::bottom);
             return joined_state;
         }
         // If MIR is NOT available, return default abstract domain
@@ -273,10 +273,13 @@ where
     pub fn get_function_post_state(&mut self) -> Option<AbstractDomain<DomainType>> {
         let fun_val = self.callee_fun_val.clone();
         if let Some(func_ref) = self.get_func_ref(&fun_val) {
-            if !self.call_stack.contains(&func_ref.def_id.unwrap()) {
-                self.call_stack.push(func_ref.def_id.unwrap());
+            let callee_id = func_ref.def_id.unwrap();
+            let recursion_depth = self.call_stack.iter().filter(|&&id| id == callee_id).count();
+            if recursion_depth < 10 {
+                self.call_stack.push(callee_id);
                 debug!("call stack {:?}", self.call_stack);
                 let res = Some(self.create_function_post_state());
+                self.call_stack.pop();
                 return res;
             }
         }
@@ -804,7 +807,9 @@ where
         function_post_state: &AbstractDomain<DomainType>,
         old_offset: usize,
     ) {
-        self.block_visitor.body_visitor.state = function_post_state.clone();
+        if !function_post_state.is_empty() {
+            self.block_visitor.body_visitor.state = function_post_state.clone();
+        }
 
         debug!("Start to transfer and refine normal return state");
         let destination_path = if let Some(dest) = self.destination {
@@ -904,7 +909,7 @@ where
                 self.block_visitor
                     .body_visitor
                     .state
-                    .update_value_at(return_value_path, result);
+                    .update_value_at(target_path.clone(), result);
             }
         }
     }

@@ -73,6 +73,22 @@ where
         }
     }
 
+    pub fn bottom() -> Self {
+        Self {
+            numerical_domain: ApronAbstractDomain::bottom(),
+            symbolic_domain: SymbolicDomain::default(),
+            exit_conditions: HashMap::new(),
+        }
+    }
+
+    pub fn top() -> Self {
+        Self {
+            numerical_domain: ApronAbstractDomain::top(),
+            symbolic_domain: SymbolicDomain::default(),
+            exit_conditions: HashMap::new(),
+        }
+    }
+
     pub fn get_paths_iter(&self) -> Vec<Rc<Path>> {
         use itertools::Itertools;
         let n = self.numerical_domain.get_paths_iter();

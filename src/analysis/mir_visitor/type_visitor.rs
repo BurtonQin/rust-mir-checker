@@ -175,10 +175,10 @@ impl<'compilation, 'tcx> TypeVisitor<'tcx> {
         }
     }
 
-    /// Returns the target type of a reference type.
-    fn get_dereferenced_type(ty: Ty<'tcx>) -> Ty<'tcx> {
+    /// Returns the target type of a reference or raw pointer type.
+    pub fn get_dereferenced_type(ty: Ty<'tcx>) -> Ty<'tcx> {
         match &ty.kind() {
-            TyKind::Ref(_, t, _) => *t,
+            TyKind::Ref(_, t, _) | TyKind::RawPtr(t, _) => *t,
             _ => ty,
         }
     }

@@ -36,6 +36,8 @@ impl<O> From<&mir::AssertKind<O>> for DiagnosticCause {
             mir::AssertKind::DivisionByZero(..) | mir::AssertKind::RemainderByZero(..) => {
                 DiagnosticCause::DivZero
             }
+            mir::AssertKind::MisalignedPointerDereference { .. }
+            | mir::AssertKind::NullPointerDereference => DiagnosticCause::Memory,
             _ => DiagnosticCause::Other,
         }
     }

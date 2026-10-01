@@ -87,6 +87,8 @@ where
                         mir::AssertKind::Overflow(..) => {
                             self.check_overflow(cond_val.clone(), *expected, abstract_value)
                         }
+                        mir::AssertKind::MisalignedPointerDereference { .. }
+                        | mir::AssertKind::NullPointerDereference => CheckerResult::Safe,
                         _ => self.check_assert_condition(cond_val, *expected, abstract_value),
                     };
 

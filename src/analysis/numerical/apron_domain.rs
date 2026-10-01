@@ -103,16 +103,10 @@ foreign_type! {
 
 // Define wrappers for `ap_abstract0_t`
 // Used to represent an abstract state
-pub struct AbstractStateRef(Opaque);
-
-unsafe impl ForeignTypeRef for AbstractStateRef {
-    type CType = apron_sys::ap_abstract0_t;
+pub struct AbstractState {
+    ptr: NonNull<apron_sys::ap_abstract0_t>,
+    man: Rc<ApronManager>,
 }
-
-pub struct AbstractState(NonNull<apron_sys::ap_abstract0_t>);
-
-unsafe impl Sync for AbstractStateRef {}
-unsafe impl Send for AbstractStateRef {}
 
 unsafe impl Sync for AbstractState {}
 unsafe impl Send for AbstractState {}
@@ -120,26 +114,49 @@ unsafe impl Send for AbstractState {}
 impl Drop for AbstractState {
     fn drop(&mut self) {
         unsafe {
-            apron_sys::ap_abstract0_free(APRON_MANAGER.clone().unwrap().as_ptr(), self.as_ptr())
+            apron_sys::ap_abstract0_free(self.man.as_ptr(), self.as_ptr());
         }
     }
 }
 
-unsafe impl ForeignType for AbstractState {
-    type CType = apron_sys::ap_abstract0_t;
-    type Ref = AbstractStateRef;
-
-    unsafe fn from_ptr(ptr: *mut apron_sys::ap_abstract0_t) -> AbstractState {
-        AbstractState(NonNull::new_unchecked(ptr))
+impl AbstractState {
+    pub unsafe fn from_ptr(ptr: *mut apron_sys::ap_abstract0_t, man: Rc<ApronManager>) -> Self {
+        Self {
+            ptr: NonNull::new_unchecked(ptr),
+            man,
+        }
     }
 
-    fn as_ptr(&self) -> *mut apron_sys::ap_abstract0_t {
-        self.0.as_ptr()
+    pub fn as_ptr(&self) -> *mut apron_sys::ap_abstract0_t {
+        self.ptr.as_ptr()
     }
 }
 
-/// Apron library uses a global manager to handle abstract domains
-static mut APRON_MANAGER: Option<Rc<ApronManager>> = None;
+thread_local! {
+    static INTERVAL_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+    static OCTAGON_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+    static POLYHEDRA_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+    static LINEAR_EQUALITIES_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+    static PPL_POLYHEDRA_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+    static PPL_LINEAR_CONGRUENCES_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+    static PKGRID_POLYHEDRA_LIN_CONGRUENCES_MANAGER: std::cell::RefCell<Option<Rc<ApronManager>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn get_or_init_manager(
+    cell: &'static std::thread::LocalKey<std::cell::RefCell<Option<Rc<ApronManager>>>>,
+    init: impl FnOnce() -> *mut apron_sys::ap_manager_t,
+) -> Rc<ApronManager> {
+    cell.with(|c| {
+        let mut opt = c.borrow_mut();
+        if let Some(man) = &*opt {
+            man.clone()
+        } else {
+            let man = unsafe { Rc::new(ApronManager::from_ptr(init())) };
+            *opt = Some(man.clone());
+            man
+        }
+    })
+}
 
 /// Represent an Apron abstract domain, whose domain type is specified by parameter `Type`
 pub struct ApronAbstractDomain<Type>
@@ -164,10 +181,13 @@ where
             var_map: self.var_map.clone(),
             phantom: self.phantom,
             abstract_state: unsafe {
-                AbstractState::from_ptr(apron_sys::ap_abstract0_copy(
-                    Self::get_manager().as_ptr(),
-                    self.abstract_state.as_ptr(),
-                ))
+                AbstractState::from_ptr(
+                    apron_sys::ap_abstract0_copy(
+                        self.abstract_state.man.as_ptr(),
+                        self.abstract_state.as_ptr(),
+                    ),
+                    self.abstract_state.man.clone(),
+                )
             },
         }
     }
@@ -177,15 +197,9 @@ where
 // They simply call their corresponding manager allocation API if the manager is not created yet
 impl GetManagerTrait for ApronAbstractDomain<ApronInterval> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man = Rc::new(ApronManager::from_ptr(apron_sys::box_manager_alloc()));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&INTERVAL_MANAGER, || unsafe {
+            apron_sys::box_manager_alloc()
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -195,15 +209,9 @@ impl GetManagerTrait for ApronAbstractDomain<ApronInterval> {
 
 impl GetManagerTrait for ApronAbstractDomain<ApronPolyhedra> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man = Rc::new(ApronManager::from_ptr(apron_sys::pk_manager_alloc(false)));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&POLYHEDRA_MANAGER, || unsafe {
+            apron_sys::pk_manager_alloc(false)
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -213,15 +221,9 @@ impl GetManagerTrait for ApronAbstractDomain<ApronPolyhedra> {
 
 impl GetManagerTrait for ApronAbstractDomain<ApronOctagon> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man = Rc::new(ApronManager::from_ptr(apron_sys::oct_manager_alloc()));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&OCTAGON_MANAGER, || unsafe {
+            apron_sys::oct_manager_alloc()
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -231,15 +233,9 @@ impl GetManagerTrait for ApronAbstractDomain<ApronOctagon> {
 
 impl GetManagerTrait for ApronAbstractDomain<ApronLinearEqualities> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man = Rc::new(ApronManager::from_ptr(apron_sys::pkeq_manager_alloc()));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&LINEAR_EQUALITIES_MANAGER, || unsafe {
+            apron_sys::pkeq_manager_alloc()
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -249,17 +245,9 @@ impl GetManagerTrait for ApronAbstractDomain<ApronLinearEqualities> {
 
 impl GetManagerTrait for ApronAbstractDomain<ApronPplPolyhedra> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man = Rc::new(ApronManager::from_ptr(
-                    apron_sys::ap_ppl_poly_manager_alloc(false),
-                ));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&PPL_POLYHEDRA_MANAGER, || unsafe {
+            apron_sys::ap_ppl_poly_manager_alloc(false)
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -269,17 +257,9 @@ impl GetManagerTrait for ApronAbstractDomain<ApronPplPolyhedra> {
 
 impl GetManagerTrait for ApronAbstractDomain<ApronPplLinearCongruences> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man = Rc::new(ApronManager::from_ptr(
-                    apron_sys::ap_ppl_grid_manager_alloc(),
-                ));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&PPL_LINEAR_CONGRUENCES_MANAGER, || unsafe {
+            apron_sys::ap_ppl_grid_manager_alloc()
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -289,19 +269,12 @@ impl GetManagerTrait for ApronAbstractDomain<ApronPplLinearCongruences> {
 
 impl GetManagerTrait for ApronAbstractDomain<ApronPkgridPolyhedraLinCongruences> {
     fn get_manager() -> Rc<ApronManager> {
-        if let Some(apron_man) = unsafe { APRON_MANAGER.clone() } {
-            apron_man
-        } else {
-            unsafe {
-                let apron_man =
-                    Rc::new(ApronManager::from_ptr(apron_sys::ap_pkgrid_manager_alloc(
-                        apron_sys::pk_manager_alloc(false),
-                        apron_sys::ap_ppl_grid_manager_alloc(),
-                    )));
-                APRON_MANAGER = Some(apron_man.clone());
-                apron_man
-            }
-        }
+        get_or_init_manager(&PKGRID_POLYHEDRA_LIN_CONGRUENCES_MANAGER, || unsafe {
+            apron_sys::ap_pkgrid_manager_alloc(
+                apron_sys::pk_manager_alloc(false),
+                apron_sys::ap_ppl_grid_manager_alloc(),
+            )
+        })
     }
 
     fn get_domain_type() -> AbstractDomainType {
@@ -319,6 +292,17 @@ where
     }
 }
 
+impl<Type> ApronAbstractDomain<Type>
+where
+    Type: ApronDomainType,
+    ApronAbstractDomain<Type>: GetManagerTrait,
+{
+    #[inline]
+    unsafe fn new_state(ptr: *mut apron_sys::ap_abstract0_t) -> AbstractState {
+        AbstractState::from_ptr(ptr, Self::get_manager())
+    }
+}
+
 // Abstract domain forms a lattice
 impl<Type> LatticeTrait for ApronAbstractDomain<Type>
 where
@@ -327,7 +311,7 @@ where
 {
     fn top() -> Self {
         let abstract_state = unsafe {
-            AbstractState::from_ptr(apron_sys::ap_abstract0_top(
+            Self::new_state(apron_sys::ap_abstract0_top(
                 Self::get_manager().as_ptr(),
                 0,
                 0,
@@ -343,7 +327,7 @@ where
 
     fn bottom() -> Self {
         let abstract_state = unsafe {
-            AbstractState::from_ptr(apron_sys::ap_abstract0_bottom(
+            Self::new_state(apron_sys::ap_abstract0_bottom(
                 Self::get_manager().as_ptr(),
                 0,
                 0,
@@ -359,7 +343,7 @@ where
 
     fn set_to_top(&mut self) {
         let abstract_state = unsafe {
-            AbstractState::from_ptr(apron_sys::ap_abstract0_top(
+            Self::new_state(apron_sys::ap_abstract0_top(
                 Self::get_manager().as_ptr(),
                 0,
                 0,
@@ -374,7 +358,7 @@ where
 
     fn set_to_bottom(&mut self) {
         let abstract_state = unsafe {
-            AbstractState::from_ptr(apron_sys::ap_abstract0_bottom(
+            Self::new_state(apron_sys::ap_abstract0_bottom(
                 Self::get_manager().as_ptr(),
                 0,
                 0,
@@ -519,7 +503,7 @@ where
                 AbstractDomainType::Octagon => {
                     res.var_map = new_var_map;
                     res.abstract_state = unsafe {
-                        AbstractState::from_ptr(apron_sys::ap_abstract0_oct_narrowing(
+                        Self::new_state(apron_sys::ap_abstract0_oct_narrowing(
                             Self::get_manager().as_ptr(),
                             res.get_state().as_ptr(),
                             other.get_state().as_ptr(),
@@ -542,7 +526,7 @@ where
         let new_var_map = Self::merge_var_map(&mut res, &mut other);
         res.var_map = new_var_map;
         res.abstract_state = unsafe {
-            AbstractState::from_ptr(apron_sys::ap_abstract0_widening(
+            Self::new_state(apron_sys::ap_abstract0_widening(
                 Self::get_manager().as_ptr(),
                 res.get_state().as_ptr(),
                 other.get_state().as_ptr(),
@@ -565,7 +549,7 @@ where
             res.var_map = new_var_map;
             // debug!("Merged Var Map: {:?}", res.var_map);
             res.abstract_state = unsafe {
-                AbstractState::from_ptr(apron_sys::ap_abstract0_join(
+                Self::new_state(apron_sys::ap_abstract0_join(
                     Self::get_manager().as_ptr(),
                     false,
                     res.get_state().as_ptr(),
@@ -591,7 +575,7 @@ where
             let new_var_map = Self::merge_var_map(&mut res, &mut other);
             res.var_map = new_var_map;
             res.abstract_state = unsafe {
-                AbstractState::from_ptr(apron_sys::ap_abstract0_meet(
+                Self::new_state(apron_sys::ap_abstract0_meet(
                     Self::get_manager().as_ptr(),
                     false,
                     res.get_state().as_ptr(),
@@ -684,7 +668,7 @@ where
             let dim_res = self.get_var_dim_insert(res.clone());
             unsafe {
                 self.abstract_state =
-                    AbstractState::from_ptr(apron_sys::ap_abstract0_assign_texpr(
+                    Self::new_state(apron_sys::ap_abstract0_assign_texpr(
                         Self::get_manager().as_ptr(),
                         false,
                         self.abstract_state.as_ptr(),
@@ -703,7 +687,7 @@ where
         if let Some(dim) = self.get_var_dim(var) {
             vec_dims.push(dim);
             self.abstract_state = unsafe {
-                AbstractState::from_ptr(apron_sys::ap_abstract0_forget_array(
+                Self::new_state(apron_sys::ap_abstract0_forget_array(
                     Self::get_manager().as_ptr(),
                     false,
                     self.abstract_state.as_ptr(),
@@ -750,7 +734,7 @@ where
         }
 
         self.abstract_state = unsafe {
-            AbstractState::from_ptr(apron_sys::ap_abstract0_meet_tcons_array(
+            Self::new_state(apron_sys::ap_abstract0_meet_tcons_array(
                 Self::get_manager().as_ptr(),
                 false,
                 self.abstract_state.as_ptr(),
@@ -883,14 +867,14 @@ where
             }
 
             lhs.abstract_state =
-                AbstractState::from_ptr(apron_sys::ap_abstract0_permute_dimensions(
+                Self::new_state(apron_sys::ap_abstract0_permute_dimensions(
                     Self::get_manager().as_ptr(),
                     false,
                     lhs.abstract_state.as_ptr(),
                     perm_x,
                 ));
             rhs.abstract_state =
-                AbstractState::from_ptr(apron_sys::ap_abstract0_permute_dimensions(
+                Self::new_state(apron_sys::ap_abstract0_permute_dimensions(
                     Self::get_manager().as_ptr(),
                     false,
                     rhs.abstract_state.as_ptr(),
@@ -909,7 +893,7 @@ where
             let dim = self.get_var_dim_insert(var);
             unsafe {
                 self.abstract_state =
-                    AbstractState::from_ptr(apron_sys::ap_abstract0_assign_texpr(
+                    Self::new_state(apron_sys::ap_abstract0_assign_texpr(
                         Self::get_manager().as_ptr(),
                         false,
                         self.abstract_state.as_ptr(),
@@ -947,7 +931,7 @@ where
                     (*(*dim_change).dim.add(i)) = self.get_dims() as u32;
                 }
                 self.abstract_state =
-                    AbstractState::from_ptr(apron_sys::ap_abstract0_add_dimensions(
+                    Self::new_state(apron_sys::ap_abstract0_add_dimensions(
                         Self::get_manager().as_ptr(),
                         false,
                         self.abstract_state.as_ptr(),
@@ -979,7 +963,7 @@ where
                     (*(*dim_change).dim.add(i)) = *item;
                 }
                 self.abstract_state =
-                    AbstractState::from_ptr(apron_sys::ap_abstract0_remove_dimensions(
+                    Self::new_state(apron_sys::ap_abstract0_remove_dimensions(
                         Self::get_manager().as_ptr(),
                         false,
                         self.abstract_state.as_ptr(),
@@ -1016,7 +1000,7 @@ where
         };
         let dim_res = self.get_var_dim_insert(res.clone());
         unsafe {
-            self.abstract_state = AbstractState::from_ptr(apron_sys::ap_abstract0_assign_texpr(
+            self.abstract_state = Self::new_state(apron_sys::ap_abstract0_assign_texpr(
                 Self::get_manager().as_ptr(),
                 false,
                 self.abstract_state.as_ptr(),

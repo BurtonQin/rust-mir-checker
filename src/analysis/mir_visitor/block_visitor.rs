@@ -32,6 +32,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::ConstValue;
+use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{Const, ParamConst, ScalarInt, Ty, TyKind, UserTypeAnnotationIndex};
 use std::borrow::Borrow;
 use std::convert::TryFrom;
@@ -628,6 +629,19 @@ where
         literal: &mir::Const<'tcx>,
     ) -> Rc<SymbolicValue> {
         let ty = literal.ty();
+        match ty.kind() {
+            TyKind::FnDef(def_id, generic_args)
+            | TyKind::Closure(def_id, generic_args)
+            | TyKind::Coroutine(def_id, generic_args) => {
+                let func_const = self.visit_function_reference(
+                    *def_id,
+                    ty,
+                    *generic_args,
+                );
+                return Rc::new(func_const.clone().into());
+            }
+            _ => {}
+        }
         match literal {
             mir::Const::Ty(_, c) => self.visit_ty_const(c, ty),
             mir::Const::Unevaluated(unevaluated, ty) => {
@@ -661,6 +675,15 @@ where
     }
 
     fn visit_ty_const(&mut self, literal: &rustc_middle::ty::Const<'tcx>, ty: Ty<'tcx>) -> Rc<SymbolicValue> {
+        if let Some(scalar_int) = literal.try_to_leaf() {
+            let size = scalar_int.size();
+            if size.bytes() != 0 {
+                let data = scalar_int.try_to_bits(size).unwrap_or(0);
+                return Rc::new(self.get_constant_from_scalar(&ty.kind(), data, size.bytes()).into());
+            } else {
+                return symbolic_value::BOTTOM.into();
+            }
+        }
         match literal.kind() {
             rustc_middle::ty::ConstKind::Param(ParamConst { index, .. }) => {
                 if let Some(gen_args) = self.body_visitor.type_visitor.generic_arguments {
@@ -670,9 +693,6 @@ where
                         }
                     }
                 }
-                symbolic_value::BOTTOM.into()
-            }
-            rustc_middle::ty::ConstKind::Value(..) => {
                 symbolic_value::BOTTOM.into()
             }
             _ => symbolic_value::BOTTOM.into(),
@@ -1308,18 +1328,42 @@ where
         aggregate_kinds: &mir::AggregateKind<'tcx>,
         operands: &[mir::Operand<'tcx>],
     ) {
-        assert!(matches!(aggregate_kinds, mir::AggregateKind::Array(..)));
-        let length_path = Path::new_length(path.clone()).refine_paths(&self.state());
-        let length_value = self.body_visitor.get_u128_const_val(operands.len() as u128);
-        self.body_visitor
-            .state
-            .update_value_at(length_path, length_value);
+        match aggregate_kinds {
+            mir::AggregateKind::Array(..) => {
+                let length_path = Path::new_length(path.clone()).refine_paths(&self.state());
+                let length_value = self.body_visitor.get_u128_const_val(operands.len() as u128);
+                self.body_visitor
+                    .state
+                    .update_value_at(length_path, length_value);
 
-        // Handle the list of operands
-        for (i, operand) in operands.iter().enumerate() {
-            let index_value = self.body_visitor.get_u128_const_val(i as u128);
-            let index_path = Path::new_index(path.clone(), index_value).refine_paths(&self.state());
-            self.visit_used_operand(index_path, operand);
+                // Handle the list of operands
+                for (i, operand) in operands.iter().enumerate() {
+                    let index_value = self.body_visitor.get_u128_const_val(i as u128);
+                    let index_path = Path::new_index(path.clone(), index_value).refine_paths(&self.state());
+                    self.visit_used_operand(index_path, operand);
+                }
+            }
+            mir::AggregateKind::Adt(def_id, variant_index, _args, ..) => {
+                let tcx = self.body_visitor.context.tcx;
+                let adt_def = tcx.adt_def(*def_id);
+                if adt_def.is_enum() {
+                    let discr_path = Path::new_discriminant(path.clone()).refine_paths(&self.state());
+                    let discr = adt_def.discriminant_for_variant(tcx, *variant_index);
+                    let discr_ty = adt_def.repr().discr_type().to_ty(tcx);
+                    let val = self.get_int_const_val(discr.val, discr_ty);
+                    self.body_visitor.state.update_value_at(discr_path, val);
+                }
+                for (i, operand) in operands.iter().enumerate() {
+                    let field_path = Path::new_field(path.clone(), i).refine_paths(&self.state());
+                    self.visit_used_operand(field_path, operand);
+                }
+            }
+            _ => {
+                for (i, operand) in operands.iter().enumerate() {
+                    let field_path = Path::new_field(path.clone(), i).refine_paths(&self.state());
+                    self.visit_used_operand(field_path, operand);
+                }
+            }
         }
     }
 
@@ -1358,7 +1402,34 @@ where
                     .update_value_at(path, val.logical_not());
             }
             mir::UnOp::PtrMetadata => {
-                self.visit_use(path, operand);
+                let place_path = match operand {
+                    mir::Operand::Copy(place) | mir::Operand::Move(place) => {
+                        let p = self.visit_place(place);
+                        let ptr_ty = self.body_visitor.type_visitor.get_rustc_place_type(place, self.body_visitor.current_span);
+                        Some((p, ptr_ty))
+                    }
+                    _ => None,
+                };
+                if let Some((p, ptr_ty)) = place_path {
+                    let deref_p = Path::new_deref(p.clone()).refine_paths(&self.state());
+                    let mut len_val = self.get_len(deref_p);
+                    if len_val.is_top() || len_val.is_bottom() {
+                        len_val = self.get_len(p);
+                    }
+                    if len_val.is_top() || len_val.is_bottom() {
+                        let deref_ty = type_visitor::TypeVisitor::get_dereferenced_type(ptr_ty);
+                        if let TyKind::Array(_, len) = deref_ty.kind() {
+                            len_val = self.visit_ty_const(&len, self.body_visitor.context.tcx.types.usize);
+                        }
+                    }
+                    if !len_val.is_top() && !len_val.is_bottom() {
+                        self.body_visitor.state.update_value_at(path, len_val);
+                    } else {
+                        self.visit_use(path, operand);
+                    }
+                } else {
+                    self.visit_use(path, operand);
+                }
             }
         }
     }
