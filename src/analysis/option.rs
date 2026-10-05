@@ -12,6 +12,16 @@ pub enum AbstractDomainType {
     PkgridPolyhedraLinCongruences,
 }
 
+/// The output format for emitted diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReportFormat {
+    /// Compiler-rendered diagnostics (the historical output).
+    #[default]
+    Text,
+    /// One SARIF 2.1.0 log printed to stdout.
+    Sarif,
+}
+
 #[derive(Clone, Debug)]
 pub struct AnalysisOption {
     pub entry_point: String,
@@ -25,6 +35,7 @@ pub struct AnalysisOption {
     pub deny_warnings: bool,
     pub memory_safety_only: bool,
     pub suppressed_warnings: Option<Vec<DiagnosticCause>>,
+    pub report_format: ReportFormat,
 }
 
 impl Default for AnalysisOption {
@@ -41,6 +52,7 @@ impl Default for AnalysisOption {
             deny_warnings: false,
             memory_safety_only: false,
             suppressed_warnings: None,
+            report_format: ReportFormat::default(),
         }
     }
 }
@@ -125,6 +137,15 @@ impl AnalysisOption {
                             res.cleaning_delay = cleaning_delay;
                         } else {
                             warn!("Invalid cleaning delay, use 5 as default");
+                        }
+                        indeices_to_remove.push(i);
+                        indeices_to_remove.push(i + 1);
+                    }
+                    "format" => {
+                        match args[i + 1].as_str() {
+                            "sarif" => res.report_format = ReportFormat::Sarif,
+                            "text" => res.report_format = ReportFormat::Text,
+                            _ => warn!("Unknown report format, use text as default"),
                         }
                         indeices_to_remove.push(i);
                         indeices_to_remove.push(i + 1);

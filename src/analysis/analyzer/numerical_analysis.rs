@@ -9,9 +9,10 @@ use crate::analysis::numerical::apron_domain::{
     ApronPkgridPolyhedraLinCongruences, ApronPolyhedra, ApronPplLinearCongruences,
     ApronPplPolyhedra, GetManagerTrait,
 };
-use crate::analysis::option::AbstractDomainType;
+use crate::analysis::option::{AbstractDomainType, ReportFormat};
+use crate::analysis::sarif;
 use log::info;
-use rustc_hir::def_id::DefId;
+use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use std::time::Instant;
 
 /// Traverse over a crate, analyze all functions and emit diagnoses
@@ -61,11 +62,33 @@ impl<'tcx, 'a, 'compiler> StaticAnalysis<'tcx, 'a, 'compiler>
                 diagnostics
             };
 
-        for diag in diagnostics_to_emit {
-            if diag.is_error || self.context.analysis_options.deny_warnings {
-                self.context.session.dcx().span_err(diag.span, diag.message);
-            } else {
-                self.context.session.dcx().span_warn(diag.span, diag.message);
+        match self.context.analysis_options.report_format {
+            ReportFormat::Text => {
+                for diag in diagnostics_to_emit {
+                    if diag.is_error || self.context.analysis_options.deny_warnings {
+                        self.context.session.dcx().span_err(diag.span, diag.message);
+                    } else {
+                        self.context.session.dcx().span_warn(diag.span, diag.message);
+                    }
+                }
+            }
+            ReportFormat::Sarif => {
+                // The same filtered set as the text path is used, so
+                // `--suppress_warnings` and `--memory_safety_only` apply
+                // identically; `--deny_warnings` promotes warning-level
+                // results to `error` exactly as it does for the
+                // compiler-rendered output.
+                let crate_name = self.context.tcx.crate_name(LOCAL_CRATE).to_string();
+                let sarif_diagnostics = sarif::from_diagnostics(
+                    &self.context.session.source_map(),
+                    &diagnostics_to_emit,
+                    self.context.analysis_options.deny_warnings,
+                );
+                let log = sarif::build_sarif_log(&crate_name, &sarif_diagnostics);
+                println!(
+                    "{}",
+                    serde_json::to_string(&log).expect("SARIF log serializes")
+                );
             }
         }
     }

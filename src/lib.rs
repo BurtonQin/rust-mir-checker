@@ -72,6 +72,8 @@ pub mod analysis {
     pub mod z3_solver;
     // The structure and helper functions for emitting diagnostics
     pub mod diagnostics;
+    // SARIF 2.1.0 export of the diagnostics
+    pub mod sarif;
 }
 
 // Modules for program property checkers
